@@ -1,0 +1,230 @@
+<html>
+  <head>
+    <script type="text/javascript">
+      let directionsService;
+      let directionsRenderer;
+      let map;
+      let propertyLocation;
+      const schoolLocations = {};  // In-memory storage for school locations, no sessionStorage/localStorage
+
+      // Dynamically load the Google Maps API and ensure it’s loaded
+      function loadGoogleMapsApi(apiKey, callback) {
+        console.log("Attempting to load Google Maps API...");
+
+        if (typeof google !== 'undefined' && typeof google.maps !== 'undefined') {
+          console.log('Google Maps API is already loaded');
+          callback(); // API is already loaded, just call the callback
+          return;
+        }
+
+        const existingScript = document.querySelector('script[src^="https://maps.googleapis.com/maps/api/js"]');
+        if (existingScript) {
+          console.log('Google Maps API script tag already exists, waiting for it to load');
+          existingScript.onload = () => {
+            console.log("Google Maps API script tag loaded");
+            callback();
+          };
+          return;
+        }
+
+        // Create and append the new script element to load the API
+        const script = document.createElement('script');
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry&callback=initMap`;
+        script.defer = true;
+        script.async = true;
+
+        script.onload = () => {
+          console.log('Google Maps API loaded successfully');
+          callback();
+        };
+
+        script.onerror = () => {
+          console.error('Error loading the Google Maps API');
+          document.head.removeChild(script); // Clean up the script tag if loading fails
+        };
+
+        document.head.appendChild(script);
+      }
+
+      async function initMap() {
+        console.log("Initializing map...");
+        console.log(`Property Latitude: ${propertyLatitude}, Property Longitude: ${propertyLongitude}`);
+        console.log(`Schools: ${schoolNames}`);
+
+        try {
+          propertyLocation = new google.maps.LatLng(parseFloat(propertyLatitude), parseFloat(propertyLongitude));
+          console.log(`Property location set: ${propertyLocation}`);
+
+          map = new google.maps.Map(document.getElementById("map"), {
+            zoom: 12,
+            center: propertyLocation,
+          });
+          console.log("Map initialized");
+
+          const bounds = new google.maps.LatLngBounds();
+          bounds.extend(propertyLocation);
+
+          directionsService = new google.maps.DirectionsService();
+          directionsRenderer = new google.maps.DirectionsRenderer({
+            map: map,
+          });
+
+          const propertyMarker = new google.maps.Marker({
+            position: propertyLocation,
+            map: map,
+            title: 'Property Location',
+          });
+          console.log("Property marker added");
+
+          // Check if there are any schools to add
+          if (schoolNames.length === 0) {
+            console.log("No schools provided. Displaying only the property location.");
+            return;
+          }
+
+          let schoolFound = false;
+          for (let schoolName of schoolNames) {
+            console.log(`Adding marker for school: ${schoolName}`);
+            const foundSchool = await addSchoolMarker(schoolName, propertyCity, bounds);
+            if (foundSchool) {
+              schoolFound = true;
+            }
+          }
+
+          if (!schoolFound) {
+            console.log("No nearby schools found within the 10 km range. Centering map on property.");
+            map.setCenter(propertyLocation);
+          } else {
+            map.fitBounds(bounds);
+            console.log("Map bounds adjusted to fit markers");
+          }
+        } catch (error) {
+          console.error('Error initializing map:', error.message);
+        }
+      }
+
+      function addSchoolMarker(schoolName, propertyCity, bounds) {
+        return new Promise((resolve, reject) => {
+          console.log(`Searching for school: ${schoolName}`);
+          const request = {
+            query: `${schoolName}, ${propertyCity}`,
+            locationBias: {
+              radius: 10000,
+              center: propertyLocation,
+            },
+          };
+
+          const service = new google.maps.places.PlacesService(map);
+          service.textSearch(request, (results, status) => {
+            console.log(`Google Places search status: ${status}`);
+            if (status === google.maps.places.PlacesServiceStatus.OK && results[0]) {
+              const schoolLocation = results[0].geometry.location;
+              console.log(`School found at: ${schoolLocation}`);
+
+              const distanceInKm = google.maps.geometry.spherical.computeDistanceBetween(propertyLocation, schoolLocation) / 1000;
+              console.log(`School is ${distanceInKm.toFixed(2)} km away from the property`);
+
+              if (distanceInKm <= 10) {
+                const schoolMarker = new google.maps.Marker({
+                  map: map,
+                  position: schoolLocation,
+                  title: schoolName,
+                });
+
+                schoolLocations[schoolName] = schoolLocation;  // In-memory storage for school location
+                console.log(`Stored location for ${schoolName}: ${schoolLocation}`);
+                bounds.extend(schoolLocation);
+                map.fitBounds(bounds);
+
+                google.maps.event.addListener(schoolMarker, 'click', () => {
+                  showRouteToSchool(schoolName);
+                });
+
+                resolve(true);
+              } else {
+                console.log(`${schoolName} is outside the 10 km range.`);
+                resolve(false);
+              }
+            } else {
+              console.error(`Failed to find school: ${schoolName}. Status: ${status}`);
+              resolve(false);
+            }
+          });
+        });
+      }
+
+      function showRouteToSchool(schoolName) {
+        console.log(`Showing route to school: ${schoolName}`);
+        try {
+          if (!directionsService || !directionsRenderer) {
+            throw new Error('Directions service or renderer not initialized.');
+          }
+
+          const schoolLocation = schoolLocations[schoolName];
+          if (!schoolLocation) {
+            throw new Error(`No stored location for school: ${schoolName}`);
+          }
+
+          const request = {
+            origin: propertyLocation,
+            destination: schoolLocation,
+            travelMode: "DRIVING",
+          };
+
+          directionsService.route(request, (result, status) => {
+            console.log(`Directions service status: ${status}`);
+            if (status === 'OK') {
+              directionsRenderer.setDirections(result);
+
+              const route = result.routes[0].legs[0];
+              const distance = route.distance.text;
+              const duration = route.duration.text;
+
+              console.log(`Route found - Distance: ${distance}, Duration: ${duration}`);
+
+              window.flutter_inappwebview.callHandler('updateTravelInfo', `${distance}`, `${duration}`);
+
+              const bounds = new google.maps.LatLngBounds();
+              bounds.extend(result.routes[0].legs[0].start_location);
+              bounds.extend(result.routes[0].legs[0].end_location);
+              directionsRenderer.map.fitBounds(bounds);
+            } else {
+              throw new Error(`Failed to get directions. Status: ${status}`);
+            }
+          });
+        } catch (error) {
+          console.error(error.message);
+        }
+      }
+
+      // Listen for errors or when the document changes
+      window.addEventListener("error", function (e) {
+        console.error("Global error caught: ", e.message, e.filename, e.lineno);
+      });
+
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "hidden") {
+          console.warn("Document visibility state changed to hidden. Possible blank page issue.");
+        } else if (document.visibilityState === "visible") {
+          console.log("Document visibility state changed to visible.");
+        }
+      });
+    </script>
+  </head>
+
+  <body>
+    <div id="map" style="height: 100%; width: 100%;"></div>
+
+    <script>
+      const propertyLatitude = "{{propertyLatitude}}";
+      const propertyLongitude = "{{propertyLongitude}}";
+      const propertyCity = "{{propertyCity}}";
+      const schoolNames = JSON.parse('{{schoolNames}}');
+
+      const apiKey = "{{apiKey}}";  // You should dynamically replace this with the API key
+
+      console.log("Google Maps API Key:", apiKey);
+      loadGoogleMapsApi(apiKey, initMap);
+    </script>
+  </body>
+</html>
